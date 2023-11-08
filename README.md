@@ -1,2 +1,2 @@
-# soft_deletable
+# Soft_Deletable
 Soft delete implementation for Rails app
