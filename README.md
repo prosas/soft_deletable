@@ -2,6 +2,10 @@
 Soft delete implementation for Rails app.
 
 # Usage
+Install gem:
+```sh
+ gem 'soft_deletable', git: "https://github.com/prosas/soft_deletable"
+```
 ```ruby
 class MyModel < ApplicationRecord
 	extend SoftDeletable
