@@ -45,7 +45,7 @@ module SoftDeletable
     if ActiveRecord::VERSION::MAJOR <= 6
       default_scope { where("#{table_name}.#{column} is not ?", true) } if default_options[:default_scoped]
     elsif default_options[:default_scoped]
-      default_scope { where("#{table_name}.#{column} <> ? OR #{table_name}.#{column} is not ? true", true) }
+      default_scope { where("#{table_name}.#{column} <> ? OR #{table_name}.#{column} is not true", true) }
     end
 
     define_method("#{column}=") do |_value|
