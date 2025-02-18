@@ -39,13 +39,13 @@ module SoftDeletable
   # @param block [Block] a implementação do soft delete, por padrão é self.update_column(column, true)
   #
   def soft_destroy(column, options = {}, &block)
-    default_options = { default_scoped: true, if: -> (_instance) { true }, message: 'já foi deletado' }
+    default_options = { default_scoped: true, if: ->(_instance) { true }, message: 'já foi deletado' }
     default_options.merge!(options)
 
     if ActiveRecord::VERSION::MAJOR <= 6
       default_scope { where("#{table_name}.#{column} is not ?", true) } if default_options[:default_scoped]
     elsif default_options[:default_scoped]
-      default_scope { where("#{table_name}.#{column} <> ?", true) }
+      default_scope { where("#{table_name}.#{column} <> ? OR #{table_name}.#{column} is not ? true", true) }
     end
 
     define_method("#{column}=") do |_value|
