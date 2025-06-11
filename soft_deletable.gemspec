@@ -14,4 +14,8 @@ Gem::Specification.new do |s|
   s.license     = 'MIT'
 
   s.metadata['allowed_push_host'] = 'https://rubygems.org'
+  s.add_development_dependency "rake", [">= 13"]
+  s.add_development_dependency "sqlite3"
+  s.add_development_dependency "minitest", [">= 5"]
+  s.add_development_dependency "byebug", [">= 11"]
 end
