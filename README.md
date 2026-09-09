@@ -46,16 +46,29 @@ You can define a validation for the **soft_destroy** method.
 ```
 # Force destroy
 When `force_destroy` is exactly `true`, the `if` condition is skipped and the record is destroyed anyway. Any other value still respects `if`.
-
-The same flag is forwarded to `dependent: :destroy` associations, so they also skip their `if` conditions during the cascade.
 ```ruby
 soft_destroy :removed, if: ->(instance){ instance.can_remove? }
 
 @model.destroy                    # respects `if`
-@model.destroy(force_destroy: true) # ignores `if` and forces the destroy (including dependents)
+@model.destroy(force_destroy: true) # ignores `if` and forces the destroy
 ```
+# Destroy metadata
+By default, `destroy` also fills:
+- `deleted_at` (`deleted_at_column`) with the deletion timestamp
+- `identify_destroy` (`indentify_destroy_column`) with a unique UUID for that deletion
+
+```ruby
+soft_destroy :removed,
+             deleted_at_column: :removed_at,
+             indentify_destroy_column: :removal_id
+```
+
+`recover` clears those columns in the default implementation.
+
 # Custom function
 Allow you to define your own implementation.
+
+Before the block runs, the gem fills `deleted_at_column` and `indentify_destroy_column`. After the block, it reloads the record and raises `SoftDeletable::MissingDestroyAttribute` if either value is blank. The whole destroy runs inside a transaction, so a missing value rolls back the deletion.
 ```ruby
 #...
  soft_destroy :removed do |instance|

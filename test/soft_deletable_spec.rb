@@ -17,39 +17,33 @@ ActiveRecord::Schema.define do
   create_table :test_models, force: true do |t|
     t.boolean :deleted, default: false
     t.datetime :deleted_at
+    t.string :identify_destroy
   end
 
   create_table :recover_parents, force: true do |t|
     t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
   end
 
   create_table :recover_children, force: true do |t|
     t.integer :recover_parent_id
     t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
   end
 
   create_table :recover_grandchildren, force: true do |t|
     t.integer :recover_child_id
     t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
   end
 
-  create_table :force_parents, force: true do |t|
+  create_table :custom_column_models, force: true do |t|
     t.boolean :deleted, default: false
-  end
-
-  create_table :force_children, force: true do |t|
-    t.integer :force_parent_id
-    t.boolean :deleted, default: false
-  end
-
-  create_table :force_grandchildren, force: true do |t|
-    t.integer :force_child_id
-    t.boolean :deleted, default: false
-  end
-
-  create_table :force_independents, force: true do |t|
-    t.integer :force_parent_id
-    t.boolean :deleted, default: false
+    t.datetime :removed_at
+    t.string :removal_id
   end
 end
 
@@ -79,30 +73,10 @@ class RecoverGrandchild < ActiveRecord::Base
   soft_destroy :deleted
 end
 
-class ForceParent < ActiveRecord::Base
+class CustomColumnModel < ActiveRecord::Base
   extend SoftDeletable
-  has_many :force_children, dependent: :destroy
-  has_many :force_independents
-  soft_destroy :deleted
-end
-
-class ForceChild < ActiveRecord::Base
-  extend SoftDeletable
-  belongs_to :force_parent
-  has_many :force_grandchildren, dependent: :destroy
-  soft_destroy :deleted, if: ->(_instance) { false }
-end
-
-class ForceGrandchild < ActiveRecord::Base
-  extend SoftDeletable
-  belongs_to :force_child
-  soft_destroy :deleted, if: ->(_instance) { false }
-end
-
-class ForceIndependent < ActiveRecord::Base
-  extend SoftDeletable
-  belongs_to :force_parent
-  soft_destroy :deleted
+  self.table_name = 'custom_column_models'
+  soft_destroy :deleted, deleted_at_column: :removed_at, indentify_destroy_column: :removal_id
 end
 
 class SoftDeletableTest < Minitest::Test
@@ -165,9 +139,13 @@ class SoftDeletableTest < Minitest::Test
     TestModel.soft_destroy(:deleted)
     @model.destroy
     assert_equal true, @model.deleted
+    assert @model.deleted_at.present?
+    assert @model.identify_destroy.present?
 
     @model.recover
     assert_equal false, @model.deleted
+    assert_nil @model.deleted_at
+    assert_nil @model.identify_destroy
   end
 
   def test_custom_recover_implementation
@@ -210,51 +188,64 @@ class SoftDeletableTest < Minitest::Test
     assert_equal false, parent.reload.deleted
     assert_equal false, child.reload.deleted
     assert_equal false, grandchild.reload.deleted
+    assert_nil parent.deleted_at
+    assert_nil parent.identify_destroy
+    assert_nil child.deleted_at
+    assert_nil grandchild.deleted_at
   end
 
-  def test_destroy_without_force_does_not_bypass_association_if
-    parent = ForceParent.create
-    child = ForceChild.create(force_parent: parent)
-    grandchild = ForceGrandchild.create(force_child: child)
+  def test_default_destroy_fills_deleted_at_and_identify_destroy
+    TestModel.soft_destroy(:deleted)
+    @model.destroy
 
-    parent.destroy
-
-    assert_equal true, parent.reload.deleted
-    refute_equal true, child.reload.deleted
-    refute_equal true, grandchild.reload.deleted
+    assert_equal true, @model.deleted
+    assert @model.deleted_at.present?
+    assert @model.identify_destroy.present?
   end
 
-  def test_force_destroy_is_forwarded_to_dependent_associations
-    parent = ForceParent.create
-    child = ForceChild.create(force_parent: parent)
-    grandchild = ForceGrandchild.create(force_child: child)
+  def test_identify_destroy_is_unique_per_destroy
+    TestModel.soft_destroy(:deleted)
+    other = TestModel.create
+    @model.destroy
+    other.destroy
 
-    parent.destroy(force_destroy: true)
-
-    assert_equal true, parent.reload.deleted
-    assert_equal true, child.reload.deleted
-    assert_equal true, grandchild.reload.deleted
+    refute_equal @model.identify_destroy, other.identify_destroy
   end
 
-  def test_force_destroy_does_not_destroy_associations_without_dependent
-    parent = ForceParent.create
-    independent = ForceIndependent.create(force_parent: parent)
+  def test_custom_deleted_at_and_indentify_destroy_columns
+    model = CustomColumnModel.create
+    model.destroy
 
-    parent.destroy(force_destroy: true)
-
-    assert_equal true, parent.reload.deleted
-    refute_equal true, independent.reload.deleted
+    assert_equal true, model.deleted
+    assert model.removed_at.present?
+    assert model.removal_id.present?
   end
 
-  def test_force_destroy_does_not_leak_to_later_destroys
-    parent = ForceParent.create
-    ForceChild.create(force_parent: parent)
-    parent.destroy(force_destroy: true)
+  def test_custom_destroy_raises_when_metadata_is_cleared
+    TestModel.soft_destroy(:deleted) do |instance|
+      instance.update_columns(deleted: true, deleted_at: nil, identify_destroy: nil)
+    end
 
-    other_parent = ForceParent.create
-    other_child = ForceChild.create(force_parent: other_parent)
-    other_parent.destroy
+    error = assert_raises(SoftDeletable::MissingDestroyAttribute) do
+      @model.destroy
+    end
+    assert_match(/deleted_at/, error.message)
+    assert_match(/identify_destroy/, error.message)
 
-    refute_equal true, other_child.reload.deleted
+    @model.reload
+    refute_equal true, @model.deleted
+    assert_nil @model.deleted_at
+    assert_nil @model.identify_destroy
+  end
+
+  def test_custom_destroy_keeps_metadata_set_before_block
+    TestModel.soft_destroy(:deleted) do |instance|
+      instance.update_column(:deleted, true)
+    end
+    @model.destroy
+
+    assert_equal true, @model.deleted
+    assert @model.deleted_at.present?
+    assert @model.identify_destroy.present?
   end
 end

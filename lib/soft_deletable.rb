@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'securerandom'
+
 # Sobreescreve o método destroy padrão do ActiveRecord e implementa um soft delete
 ## Como usar
 # Extenda o module SoftDeletable no model e chame o método soft_destroy passando como parâmetro
@@ -30,16 +32,17 @@
 #	 end
 # force_destroy: quando igual a true, ignora a condição `if` das options e executa
 # o destroy mesmo assim. Qualquer outro valor continua respeitando o `if`.
-# O mesmo valor é ecoado para as associações com dependent: :destroy (o Rails
-# chama .destroy sem argumentos nos filhos; o flag segue via estado da thread).
 #	 soft_destroy :excluido, if: ->(instance) { instance.can_remove? }
 # >> registro.destroy
 # >> registro.destroy(force_destroy: true)
+# deleted_at_column: coluna datetime preenchida com o momento da exclusão (padrão :deleted_at).
+# indentify_destroy_column: coluna preenchida com um identificador único da exclusão
+# (padrão :identify_destroy).
+# Na implementação customizada, a gem preenche essas colunas antes do bloco e,
+# depois, exige que continuem preenchidas. Tudo roda em uma transaction.
 
 module SoftDeletable
   extend ActiveSupport::Concern
-
-  FORCE_DESTROY_THREAD_KEY = :soft_deletable_force_destroy
 
   class AttributeNotUpdate < StandardError
     attr_accessor :column
@@ -54,20 +57,46 @@ module SoftDeletable
     end
   end
 
+  class MissingDestroyAttribute < StandardError
+    attr_accessor :columns
+
+    def initialize(columns)
+      @columns = Array(columns)
+      super("Attribute #{@columns.join(', ')} must remain present after destroy")
+    end
+  end
+
   # == Parameters:
   # @param [Symbol] coluna que marca como excluido o registro.
   # @param options [Hash] opções.
   #        default_scoped [Booleam]: para usar default_scoped ou não
   #        if [Proc]: recebe proc que roda validação antes do destroy
-  #        force_destroy [Boolean]: se igual a true, ignora a condição `if` e força o destroy (ecoado para dependent: :destroy) (ecoado para dependent: :destroy)
+  #        force_destroy [Boolean]: se igual a true, ignora a condição `if` e força o destroy
   #        message [String]: Mensagem de erro caso não seja possível remover o objeto
   #        recover [Proc]: implementação do recover; por padrão é self.update_column(column, false)
+  #        deleted_at_column [Symbol]: coluna datetime do momento da exclusão (padrão :deleted_at)
+  #        indentify_destroy_column [Symbol]: coluna do identificador único da exclusão (padrão :identify_destroy)
   # @param block [Block] a implementação do soft delete, por padrão é self.update_column(column, true)
   #
   def soft_destroy(column, options = {}, &block)
-    default_options = { default_scoped: true, if: ->(_instance) { true }, force_destroy: false, message: 'já foi deletado' }
+    default_options = {
+      default_scoped: true,
+      if: ->(_instance) { true },
+      force_destroy: false,
+      message: 'já foi deletado',
+      deleted_at_column: :deleted_at,
+      indentify_destroy_column: :identify_destroy
+    }
     default_options.merge!(options)
-    default_options[:recover] ||= ->(instance) { instance.update_column(column, false) }
+    deleted_at_column = default_options[:deleted_at_column]
+    indentify_destroy_column = default_options[:indentify_destroy_column]
+    default_options[:recover] ||= lambda { |instance|
+      instance.update_columns(
+        column => false,
+        deleted_at_column => nil,
+        indentify_destroy_column => nil
+      )
+    }
 
     if ActiveRecord::VERSION::MAJOR <= 6
       default_scope { where("#{table_name}.#{column} is not ?", true) } if default_options[:default_scoped]
@@ -80,24 +109,27 @@ module SoftDeletable
     end
 
     define_method(:destroy) do |force_destroy: default_options[:force_destroy]|
-      force_destroy = true if Thread.current[SoftDeletable::FORCE_DESTROY_THREAD_KEY] == true
-
       if force_destroy == true || default_options[:if].call(self)
-        previous_force_destroy = Thread.current[SoftDeletable::FORCE_DESTROY_THREAD_KEY]
-        Thread.current[SoftDeletable::FORCE_DESTROY_THREAD_KEY] = true if force_destroy == true
-
-        begin
+        transaction do
           run_callbacks(:destroy) do
             run_callbacks(:commit) do
+              update_columns(
+                deleted_at_column => Time.current,
+                indentify_destroy_column => SecureRandom.uuid
+              )
+
               if block
                 block.call(self)
+                reload
+                missing = []
+                missing << deleted_at_column if self[deleted_at_column].blank?
+                missing << indentify_destroy_column if self[indentify_destroy_column].blank?
+                raise MissingDestroyAttribute.new(missing) if missing.any?
               else
                 update_column(column, true)
               end
             end
           end
-        ensure
-          Thread.current[SoftDeletable::FORCE_DESTROY_THREAD_KEY] = previous_force_destroy
         end
       else
         errors.add(column, default_options[:message])
