@@ -44,6 +44,16 @@ You can define a validation for the **soft_destroy** method.
  soft_destroy :removed, if: ->(instance){ instance.can_remove? }, message: 'Don`t do this.'
 #...
 ```
+# Force destroy
+When `force_destroy` is exactly `true`, the `if` condition is skipped and the record is destroyed anyway. Any other value still respects `if`.
+
+The same flag is forwarded to `dependent: :destroy` associations, so they also skip their `if` conditions during the cascade.
+```ruby
+soft_destroy :removed, if: ->(instance){ instance.can_remove? }
+
+@model.destroy                    # respects `if`
+@model.destroy(force_destroy: true) # ignores `if` and forces the destroy (including dependents)
+```
 # Custom function
 Allow you to define your own implementation.
 ```ruby
