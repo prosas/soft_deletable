@@ -18,7 +18,7 @@ require 'active_support/current_attributes'
 # >> registro.destroy
 # Para reverter, chame recover. O recover restaura a instância e, em seguida,
 # percorre recursivamente as associações destruídas (has_many/has_one)
-# chamando recover em cada uma.
+# que compartilham o mesmo indentify_destroy_column, chamando recover em cada uma.
 # >> registro.recover
 # Com implementação customizada via Proc, injete o recover pelas options:
 #	 soft_destroy :excluido, recover: ->(instance) { instance.update_column(:excluido_em, nil) } do |instance|
@@ -133,6 +133,8 @@ module SoftDeletable
       )
     }
 
+    define_singleton_method(:indentify_destroy_column) { indentify_destroy_column }
+
     if ActiveRecord::VERSION::MAJOR <= 6
       default_scope { where("#{table_name}.#{column} is not ?", true) } if default_options[:default_scoped]
     elsif default_options[:default_scoped]
@@ -184,14 +186,17 @@ module SoftDeletable
       return if visited[key]
 
       visited[key] = true
+      identify_token = self[indentify_destroy_column]
       default_options[:recover].call(self)
 
-      destroyed_associations.each do |record|
+      destroyed_associations(identify_token).each do |record|
         record.recover(visited) if record.respond_to?(:recover)
       end
     end
 
-    define_method(:destroyed_associations) do
+    define_method(:destroyed_associations) do |identify_token = nil|
+      return [] if identify_token.blank?
+
       associations = self.class.reflect_on_all_associations(:has_many) +
                      self.class.reflect_on_all_associations(:has_one)
 
@@ -202,8 +207,15 @@ module SoftDeletable
         klass = reflection.klass
         next unless klass.respond_to?(:all_deleted)
 
+        child_identify_column = if klass.respond_to?(:indentify_destroy_column)
+          klass.indentify_destroy_column
+        else
+          indentify_destroy_column
+        end
+
         scope = klass.all_deleted.where(reflection.foreign_key => id)
         scope = scope.where(reflection.type => self.class.base_class.name) if reflection.type
+        scope = scope.where(child_identify_column => identify_token)
         records.concat(scope.to_a)
       rescue NameError
         next

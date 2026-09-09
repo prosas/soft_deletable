@@ -195,6 +195,25 @@ class SoftDeletableTest < Minitest::Test
     assert_nil grandchild.deleted_at
   end
 
+  def test_recover_only_restores_children_with_same_identify_destroy
+    parent = RecoverParent.create
+    cascaded_child = RecoverChild.create(recover_parent: parent)
+    independent_child = RecoverChild.create(recover_parent: parent)
+    cascaded_grandchild = RecoverGrandchild.create(recover_child: cascaded_child)
+    independent_grandchild = RecoverGrandchild.create(recover_child: independent_child)
+
+    independent_child.destroy
+    parent.destroy
+
+    parent.recover
+
+    refute_includes RecoverParent.all_deleted, parent
+    refute_includes RecoverChild.all_deleted, cascaded_child
+    refute_includes RecoverGrandchild.all_deleted, cascaded_grandchild
+    assert_includes RecoverChild.all_deleted, independent_child
+    assert_includes RecoverGrandchild.all_deleted, independent_grandchild
+  end
+
   def test_default_destroy_fills_deleted_at_and_identify_destroy
     TestModel.soft_destroy(:deleted)
     @model.destroy
