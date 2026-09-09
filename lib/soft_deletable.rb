@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'securerandom'
+require 'active_support/current_attributes'
 
 # Sobreescreve o método destroy padrão do ActiveRecord e implementa um soft delete
 ## Como usar
@@ -40,9 +41,43 @@ require 'securerandom'
 # (padrão :identify_destroy).
 # Na implementação customizada, a gem preenche essas colunas antes do bloco e,
 # depois, exige que continuem preenchidas. Tudo roda em uma transaction.
+# Se destroyed_by_association estiver presente, o filho reutiliza o
+# indentify_destroy_column do pai, lido de SoftDeletable::Current pela chave
+# id_nome_da_classe (ex: "123_RecoverParent").
 
 module SoftDeletable
   extend ActiveSupport::Concern
+
+  class Current < ActiveSupport::CurrentAttributes
+    attribute :identify_destroys
+
+    def self.id_nome_da_classe(id, nome_da_classe)
+      "#{id}_#{nome_da_classe}"
+    end
+
+    def self.identify_destroy_hash
+      identify_destroys || {}
+    end
+
+    def self.store_identify_destroy(record, value)
+      key = id_nome_da_classe(record.id, record.class.base_class.name)
+      self.identify_destroys = identify_destroy_hash.merge(key => value)
+    end
+
+    def self.fetch_identify_destroy(id, nome_da_classe)
+      identify_destroy_hash[id_nome_da_classe(id, nome_da_classe)]
+    end
+
+    def self.identify_destroy_from_association(record)
+      reflection = record.destroyed_by_association
+      return unless reflection
+
+      parent_id = record[reflection.foreign_key]
+      return if parent_id.blank?
+
+      fetch_identify_destroy(parent_id, reflection.active_record.base_class.name)
+    end
+  end
 
   class AttributeNotUpdate < StandardError
     attr_accessor :column
@@ -110,12 +145,19 @@ module SoftDeletable
 
     define_method(:destroy) do |force_destroy: default_options[:force_destroy]|
       if force_destroy == true || default_options[:if].call(self)
+        identify_destroy_value = if destroyed_by_association
+          SoftDeletable::Current.identify_destroy_from_association(self) || SecureRandom.uuid
+        else
+          SecureRandom.uuid
+        end
+        SoftDeletable::Current.store_identify_destroy(self, identify_destroy_value)
+
         transaction do
           run_callbacks(:destroy) do
             run_callbacks(:commit) do
               update_columns(
                 deleted_at_column => Time.current,
-                indentify_destroy_column => SecureRandom.uuid
+                indentify_destroy_column => identify_destroy_value
               )
 
               if block

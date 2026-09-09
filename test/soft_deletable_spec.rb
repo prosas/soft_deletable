@@ -81,6 +81,7 @@ end
 
 class SoftDeletableTest < Minitest::Test
   def setup
+    SoftDeletable::Current.reset
     @model = TestModel.create
   end
 
@@ -247,5 +248,46 @@ class SoftDeletableTest < Minitest::Test
     assert_equal true, @model.deleted
     assert @model.deleted_at.present?
     assert @model.identify_destroy.present?
+  end
+
+  def test_dependent_destroy_reuses_parent_identify_destroy
+    parent = RecoverParent.create
+    child = RecoverChild.create(recover_parent: parent)
+    grandchild = RecoverGrandchild.create(recover_child: child)
+
+    parent.destroy
+
+    parent_deleted = RecoverParent.all_deleted.find(parent.id)
+    child_deleted = RecoverChild.all_deleted.find(child.id)
+    grandchild_deleted = RecoverGrandchild.all_deleted.find(grandchild.id)
+
+    assert parent_deleted.identify_destroy.present?
+    assert_equal parent_deleted.identify_destroy, child_deleted.identify_destroy
+    assert_equal parent_deleted.identify_destroy, grandchild_deleted.identify_destroy
+  end
+
+  def test_identify_destroy_is_stored_in_current_attributes_by_id_nome_da_classe
+    TestModel.soft_destroy(:deleted)
+    @model.destroy
+
+    key = SoftDeletable::Current.id_nome_da_classe(@model.id, 'TestModel')
+    assert_equal @model.identify_destroy, SoftDeletable::Current.identify_destroys[key]
+  end
+
+  def test_direct_child_destroy_does_not_copy_parent_identify_destroy
+    parent = RecoverParent.create
+    child = RecoverChild.create(recover_parent: parent)
+    grandchild = RecoverGrandchild.create(recover_child: child)
+
+    child.destroy
+
+    parent.reload
+    child_deleted = RecoverChild.all_deleted.find(child.id)
+    grandchild_deleted = RecoverGrandchild.all_deleted.find(grandchild.id)
+
+    refute_equal true, parent.deleted
+    assert_nil parent.identify_destroy
+    assert child_deleted.identify_destroy.present?
+    assert_equal child_deleted.identify_destroy, grandchild_deleted.identify_destroy
   end
 end
