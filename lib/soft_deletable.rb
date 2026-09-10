@@ -17,8 +17,8 @@ require 'active_support/current_attributes'
 # >> registro = Model.first
 # >> registro.destroy
 # Para reverter, chame recover. O recover restaura a instância e, em seguida,
-# percorre recursivamente as associações destruídas (has_many/has_one)
-# que compartilham o mesmo indentify_destroy_column, chamando recover em cada uma.
+# percorre recursivamente as associações has_many/has_one com dependent: :destroy
+# que implementam soft_destroy e compartilham o mesmo indentify_destroy_column.
 # >> registro.recover
 # Com implementação customizada via Proc, injete o recover pelas options:
 #	 soft_destroy :excluido, recover: ->(instance) { instance.update_column(:excluido_em, nil) } do |instance|
@@ -42,14 +42,15 @@ require 'active_support/current_attributes'
 # Na implementação customizada, a gem preenche essas colunas antes do bloco e,
 # depois, exige que continuem preenchidas. Tudo roda em uma transaction.
 # Se destroyed_by_association estiver presente, o filho reutiliza o
-# indentify_destroy_column do pai, lido de SoftDeletable::Current pela chave
-# id_nome_da_classe (ex: "123_RecoverParent").
+# indentify_destroy_column e o force_destroy do pai, lidos de SoftDeletable::Current
+# pela chave id_nome_da_classe (ex: "123_RecoverParent").
 
 module SoftDeletable
   extend ActiveSupport::Concern
 
   class Current < ActiveSupport::CurrentAttributes
     attribute :identify_destroys
+    attribute :force_destroys
 
     def self.id_nome_da_classe(id, nome_da_classe)
       "#{id}_#{nome_da_classe}"
@@ -59,23 +60,46 @@ module SoftDeletable
       identify_destroys || {}
     end
 
+    def self.force_destroy_hash
+      force_destroys || {}
+    end
+
     def self.store_identify_destroy(record, value)
       key = id_nome_da_classe(record.id, record.class.base_class.name)
       self.identify_destroys = identify_destroy_hash.merge(key => value)
+    end
+
+    def self.store_force_destroy(record, value)
+      key = id_nome_da_classe(record.id, record.class.base_class.name)
+      self.force_destroys = force_destroy_hash.merge(key => value)
     end
 
     def self.fetch_identify_destroy(id, nome_da_classe)
       identify_destroy_hash[id_nome_da_classe(id, nome_da_classe)]
     end
 
-    def self.identify_destroy_from_association(record)
+    def self.fetch_force_destroy(id, nome_da_classe)
+      force_destroy_hash[id_nome_da_classe(id, nome_da_classe)]
+    end
+
+    def self.association_parent_key(record)
       reflection = record.destroyed_by_association
       return unless reflection
 
       parent_id = record[reflection.foreign_key]
       return if parent_id.blank?
 
-      fetch_identify_destroy(parent_id, reflection.active_record.base_class.name)
+      id_nome_da_classe(parent_id, reflection.active_record.base_class.name)
+    end
+
+    def self.identify_destroy_from_association(record)
+      key = association_parent_key(record)
+      identify_destroy_hash[key] if key
+    end
+
+    def self.force_destroy_from_association(record)
+      key = association_parent_key(record)
+      force_destroy_hash[key] if key
     end
   end
 
@@ -146,6 +170,10 @@ module SoftDeletable
     end
 
     define_method(:destroy) do |force_destroy: default_options[:force_destroy]|
+      if destroyed_by_association && SoftDeletable::Current.force_destroy_from_association(self) == true
+        force_destroy = true
+      end
+
       if force_destroy == true || default_options[:if].call(self)
         identify_destroy_value = if destroyed_by_association
           SoftDeletable::Current.identify_destroy_from_association(self) || SecureRandom.uuid
@@ -153,6 +181,7 @@ module SoftDeletable
           SecureRandom.uuid
         end
         SoftDeletable::Current.store_identify_destroy(self, identify_destroy_value)
+        SoftDeletable::Current.store_force_destroy(self, force_destroy == true)
 
         transaction do
           run_callbacks(:destroy) do
@@ -169,6 +198,7 @@ module SoftDeletable
                 missing << deleted_at_column if self[deleted_at_column].blank?
                 missing << indentify_destroy_column if self[indentify_destroy_column].blank?
                 raise MissingDestroyAttribute.new(missing) if missing.any?
+                true # To not raise exception when deliver! methods will call
               else
                 update_column(column, true)
               end
@@ -182,15 +212,18 @@ module SoftDeletable
     end
 
     define_method(:recover) do |visited = {}|
-      key = [self.class.base_class.name, id]
-      return if visited[key]
+      transaction do
+        key = [self.class.base_class.name, id]
+        return if visited[key]
 
-      visited[key] = true
-      identify_token = self[indentify_destroy_column]
-      default_options[:recover].call(self)
+        visited[key] = true
+        identify_token = self[indentify_destroy_column]
+        default_options[:recover].call(self)
 
-      destroyed_associations(identify_token).each do |record|
-        record.recover(visited) if record.respond_to?(:recover)
+        destroyed_associations(identify_token).each do |record|
+          next unless record.class.respond_to?(:indentify_destroy_column)
+          record.recover(visited) if record.respond_to?(:recover)
+        end
       end
     end
 
@@ -201,17 +234,15 @@ module SoftDeletable
                      self.class.reflect_on_all_associations(:has_one)
 
       associations.each_with_object([]) do |reflection, records|
+        next unless reflection.options[:dependent] == :destroy
         next if reflection.options[:through]
         next if reflection.polymorphic?
 
         klass = reflection.klass
         next unless klass.respond_to?(:all_deleted)
+        next unless klass.respond_to?(:indentify_destroy_column)
 
-        child_identify_column = if klass.respond_to?(:indentify_destroy_column)
-          klass.indentify_destroy_column
-        else
-          indentify_destroy_column
-        end
+        child_identify_column = klass.indentify_destroy_column
 
         scope = klass.all_deleted.where(reflection.foreign_key => id)
         scope = scope.where(reflection.type => self.class.base_class.name) if reflection.type

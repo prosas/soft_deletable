@@ -40,10 +40,55 @@ ActiveRecord::Schema.define do
     t.string :identify_destroy
   end
 
+  create_table :recover_independents, force: true do |t|
+    t.integer :recover_parent_id
+    t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
+  end
+
+  create_table :hard_recover_children, force: true do |t|
+    t.integer :recover_parent_id
+    t.string :name
+  end
+
   create_table :custom_column_models, force: true do |t|
     t.boolean :deleted, default: false
     t.datetime :removed_at
     t.string :removal_id
+  end
+
+  create_table :force_parents, force: true do |t|
+    t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
+  end
+
+  create_table :force_children, force: true do |t|
+    t.integer :force_parent_id
+    t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
+  end
+
+  create_table :force_grandchildren, force: true do |t|
+    t.integer :force_child_id
+    t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
+  end
+
+  create_table :tx_recover_parents, force: true do |t|
+    t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
+  end
+
+  create_table :tx_recover_children, force: true do |t|
+    t.integer :tx_recover_parent_id
+    t.boolean :deleted, default: false
+    t.datetime :deleted_at
+    t.string :identify_destroy
   end
 end
 
@@ -57,6 +102,8 @@ end
 class RecoverParent < ActiveRecord::Base
   extend SoftDeletable
   has_many :recover_children, dependent: :destroy
+  has_many :recover_independents
+  has_many :hard_recover_children, dependent: :destroy
   soft_destroy :deleted
 end
 
@@ -73,10 +120,51 @@ class RecoverGrandchild < ActiveRecord::Base
   soft_destroy :deleted
 end
 
+class RecoverIndependent < ActiveRecord::Base
+  extend SoftDeletable
+  belongs_to :recover_parent
+  soft_destroy :deleted
+end
+
+class HardRecoverChild < ActiveRecord::Base
+  belongs_to :recover_parent
+end
+
 class CustomColumnModel < ActiveRecord::Base
   extend SoftDeletable
   self.table_name = 'custom_column_models'
   soft_destroy :deleted, deleted_at_column: :removed_at, indentify_destroy_column: :removal_id
+end
+
+class ForceParent < ActiveRecord::Base
+  extend SoftDeletable
+  has_many :force_children, dependent: :destroy
+  soft_destroy :deleted
+end
+
+class ForceChild < ActiveRecord::Base
+  extend SoftDeletable
+  belongs_to :force_parent
+  has_many :force_grandchildren, dependent: :destroy
+  soft_destroy :deleted, if: ->(_instance) { false }
+end
+
+class ForceGrandchild < ActiveRecord::Base
+  extend SoftDeletable
+  belongs_to :force_child
+  soft_destroy :deleted, if: ->(_instance) { false }
+end
+
+class TxRecoverParent < ActiveRecord::Base
+  extend SoftDeletable
+  has_many :tx_recover_children, dependent: :destroy
+  soft_destroy :deleted
+end
+
+class TxRecoverChild < ActiveRecord::Base
+  extend SoftDeletable
+  belongs_to :tx_recover_parent
+  soft_destroy :deleted, recover: ->(_instance) { raise 'recover failed' }
 end
 
 class SoftDeletableTest < Minitest::Test
@@ -214,6 +302,50 @@ class SoftDeletableTest < Minitest::Test
     assert_includes RecoverGrandchild.all_deleted, independent_grandchild
   end
 
+  def test_recover_skips_associations_without_dependent_destroy
+    parent = RecoverParent.create
+    child = RecoverChild.create(recover_parent: parent)
+    independent = RecoverIndependent.create(recover_parent: parent)
+
+    independent.destroy
+    parent.destroy
+
+    parent_token = RecoverParent.all_deleted.find(parent.id).identify_destroy
+    RecoverIndependent.all_deleted.find(independent.id).update_column(:identify_destroy, parent_token)
+
+    parent.recover
+
+    refute_includes RecoverChild.all_deleted, child
+    assert_includes RecoverIndependent.all_deleted, independent
+  end
+
+  def test_recover_skips_relations_without_soft_destroy
+    parent = RecoverParent.create
+    hard_child = HardRecoverChild.create(recover_parent: parent, name: 'hard')
+    child = RecoverChild.create(recover_parent: parent)
+
+    parent.destroy
+    parent.recover
+
+    refute HardRecoverChild.exists?(hard_child.id)
+    refute_includes RecoverChild.all_deleted, child
+    assert_equal false, parent.reload.deleted
+  end
+
+  def test_recover_rolls_back_when_child_recover_fails
+    parent = TxRecoverParent.create
+    child = TxRecoverChild.create(tx_recover_parent: parent)
+    parent.destroy
+
+    error = assert_raises(RuntimeError) { parent.recover }
+    assert_equal 'recover failed', error.message
+
+    assert_includes TxRecoverParent.all_deleted, parent
+    assert_includes TxRecoverChild.all_deleted, child
+    assert_equal true, TxRecoverParent.all_deleted.find(parent.id).deleted
+    assert_equal true, TxRecoverChild.all_deleted.find(child.id).deleted
+  end
+
   def test_default_destroy_fills_deleted_at_and_identify_destroy
     TestModel.soft_destroy(:deleted)
     @model.destroy
@@ -308,5 +440,50 @@ class SoftDeletableTest < Minitest::Test
     assert_nil parent.identify_destroy
     assert child_deleted.identify_destroy.present?
     assert_equal child_deleted.identify_destroy, grandchild_deleted.identify_destroy
+  end
+
+  def test_force_destroy_is_stored_in_current_attributes
+    TestModel.soft_destroy(:deleted)
+    @model.destroy(force_destroy: true)
+
+    key = SoftDeletable::Current.id_nome_da_classe(@model.id, 'TestModel')
+    assert_equal true, SoftDeletable::Current.force_destroys[key]
+  end
+
+  def test_association_destroy_without_force_respects_child_if
+    parent = ForceParent.create
+    child = ForceChild.create(force_parent: parent)
+    grandchild = ForceGrandchild.create(force_child: child)
+
+    parent.destroy
+
+    assert_includes ForceParent.all_deleted, parent
+    refute_includes ForceChild.all_deleted, child
+    refute_includes ForceGrandchild.all_deleted, grandchild
+  end
+
+  def test_association_destroy_with_force_forwards_force_destroy_to_children
+    parent = ForceParent.create
+    child = ForceChild.create(force_parent: parent)
+    grandchild = ForceGrandchild.create(force_child: child)
+
+    parent.destroy(force_destroy: true)
+
+    assert_includes ForceParent.all_deleted, parent
+    assert_includes ForceChild.all_deleted, child
+    assert_includes ForceGrandchild.all_deleted, grandchild
+  end
+
+  def test_direct_child_destroy_without_force_still_respects_if
+    parent = ForceParent.create
+    child = ForceChild.create(force_parent: parent)
+
+    child.destroy
+
+    refute_includes ForceChild.all_deleted, child
+    assert child.errors.any?
+
+    child.destroy(force_destroy: true)
+    assert_includes ForceChild.all_deleted, child
   end
 end
