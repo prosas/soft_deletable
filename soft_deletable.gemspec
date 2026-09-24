@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |s|
   s.name        = 'soft_deletable'
-  s.version     = '1.0.0'
+  s.version     = '2.0.0'
   s.date        = '2023-11-08'
   s.summary     = 'Soft delete implementation for Rails apps'
   s.description = 'Soft delete implementation for Rails apps'
